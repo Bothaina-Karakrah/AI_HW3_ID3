@@ -3,6 +3,8 @@ import pandas
 import math
 from sklearn.model_selection import KFold
 from matplotlib import pyplot
+# define consts
+ID = 208136176
 
 
 class Node:
@@ -17,10 +19,11 @@ class Node:
 
 class ID3:
 
-    def __init__(self, min_for_pruning=0):
+    def __init__(self, M=2):
         self.root = None
-        self.min_for_pruning = min_for_pruning
+        self.M = M  # The prune value
 
+    # ==== given a row return the entropy of it ====
     def calc_entropy(self, row):
         if len(row) == 0:
             return 0
@@ -35,6 +38,19 @@ class ID3:
             return 0
         return -p_B * math.log(p_B, 2) - p_M * math.log(p_M, 2)
 
+    # ==== given a row return the prediction of a leaf based in its neighbors ====
+    def predict_sample(self, row):
+        B_counter = np.count_nonzero(row == 'B')
+        M_counter = np.count_nonzero(row == 'M')
+        return 'B' if B_counter > M_counter else 'M'
+
+    def is_leaf(self, row):
+        B_counter = np.count_nonzero(row == 'B')
+        M_counter = np.count_nonzero(row == 'M')
+        if B_counter and M_counter:
+            return False
+        return True
+
     def calc_info_gain(self, train, feature, thresholdVal, curr_IG):
         labels = train[:, 0]
         true_branch = train[train[:, feature] >= thresholdVal]
@@ -43,91 +59,81 @@ class ID3:
         IG_feature += (false_branch.shape[0] * self.calc_entropy(false_branch[:, 0])) / len(labels)
         return curr_IG - IG_feature
 
-    def predict_sample(self, trainSet):
-        B_counter = 0
-        M_counter = 0
-        for label in trainSet:
-            if label == 'B':
-                B_counter += 1
-            else:
-                M_counter += 1
-        return 'B' if B_counter > M_counter else 'M'
-
-    def is_leaf(self, trainSet):
-        B_counter = 0
-        M_counter = 0
-        for label in trainSet:
-            if label == 'B':
-                B_counter += 1
-            else:
-                M_counter += 1
-            if B_counter and M_counter:
-                return False
-        return True
-
-    def findBestFeature(self, trainSet, node):
-        best_gain = float("-inf")
-        fatherInfoGain = self.calc_entropy(trainSet[:, 0])
+    def find_best_feature_to_split(self, trainSet, node):
+        best_gain = 0
+        parentInfoGain = self.calc_entropy(trainSet[:, 0])
         # loop over features
         for feature in range(1, len(trainSet[0])):
-            # values = np.sort(np.unique(trainSet[:, feature]))
-            feature_arr = np.unique(trainSet[:, feature])
-            for value1, value2 in zip(feature_arr[:-1], feature_arr[1:]):
-                value = (value1 + value2) / 2
-                gain = self.calc_info_gain(trainSet, feature, value, fatherInfoGain)
-                if gain > best_gain or (value > node.threshold_val and gain == best_gain):
+            values = np.sort(np.unique(trainSet[:, feature]))
+            for i in range(len(values) - 1):
+                value = (values[i] + values[i + 1]) / 2
+                gain = self.calc_info_gain(trainSet, feature, value, parentInfoGain)
+                if gain >= best_gain:
                     best_gain = gain
                     node.threshold_val = value
                     node.featureIdx = feature
-        return
+        return best_gain
 
-    # the main function, build tree and prune
-    def buildDT(self, trainSet, node):
+    # ==== the main function, build tree and prune ====
+    def build_tree(self, trainSet, node):
         # create a Node
         if node is None:
             node = Node()
 
-        if self.is_leaf(trainSet[:, 0]):
-            node.is_leaf = True
-            node.Classification = trainSet[0, 0]
-            return node
-
-        # find the best split
-        self.findBestFeature(trainSet, node)
-
-        # call recursive the function
-        feature_true_branch = trainSet[:, node.featureIdx] >= node.threshold_val
-        feature_false_branch = trainSet[:, node.featureIdx] < node.threshold_val
-
-        if feature_true_branch.sum() < self.min_for_pruning or feature_false_branch.sum() < self.min_for_pruning:
+        # prune
+        if len(trainSet[:, 0]) < self.M or self.is_leaf(trainSet[:, 0]):
             node.is_leaf = True
             node.Classification = self.predict_sample(trainSet[:, 0])
             return node
 
-        node.true_branch = self.buildDT(trainSet[feature_true_branch], node.true_branch)
-        node.false_branch = self.buildDT(trainSet[feature_false_branch], node.false_branch)
+        # find the best split
+        IG = self.find_best_feature_to_split(trainSet, node)
 
+        # we didn't improve the branch, make it a leaf
+        if IG == 0:
+            node.is_leaf = True
+            node.Classification = self.predict_sample(trainSet[:, 0])
+            return node
+
+        # call recursive the function
+        node.true_branch = self.build_tree(trainSet[trainSet[:, node.featureIdx] >= node.threshold_val],
+                                           node.true_branch)
+        node.false_branch = self.build_tree(trainSet[trainSet[:, node.featureIdx] < node.threshold_val],
+                                            node.false_branch)
         return node
 
-    def predict(self, row, node):
-        if node.is_leaf:
-            return node.Classification
-        if row[node.featureIdx] >= node.threshold_val:
-            return self.predict(row, node.true_branch)
+    # ==== given a test sample (row) and the root of the DT return the prediction ====
+    def predict(self, row, root):
+        if root.is_leaf:
+            return root.Classification
+        if row[root.featureIdx - 1] >= root.threshold_val:
+            return self.predict(row, root.true_branch)
         else:
-            return self.predict(row, node.false_branch)
+            return self.predict(row, root.false_branch)
 
+    # ==== build a tree and learn it (fit) according to the train, then test it with the test set
+    # return list with the predictions ====
     def fit_predict(self, train, test):
-        self.root = self.buildDT(train, self.root)
-        y_pred = []
+        self.root = self.build_tree(train, self.root)
+        y_prediction = []
         for sample in test:
             if self.predict(sample, self.root) == 'M':
-                y_pred.append(1)
+                y_prediction.append(1)
             else:
-                y_pred.append(0)
-        return y_pred
+                y_prediction.append(0)
+        return y_prediction
 
 
+"""
+========================================================================
+                              Experiments 
+========================================================================
+"""
+# This function calculate the prune effect
+# arguments: train - the train set we use to train the model
+# to print remove the quotes
+
+# calculate the accuracy of the tree we build
 def accuracy(y_prediction, test):
     counter = 0
     assert len(test[:, 0]) == len(y_prediction)
@@ -140,44 +146,53 @@ def accuracy(y_prediction, test):
 
 
 def experiment(train):
-    k_fold = KFold(n_splits=5, shuffle=True, random_state=208136176)
-    m_choices = [1, 5, 10, 15, 25]
+    k_fold = KFold(n_splits=5, shuffle=True, random_state=ID)
+    # the result
+    m_choices = [2, 8, 15, 23, 30]
     accuracies = []
     for m in m_choices:
-        m_arr = []
+        m_accuracy = []
         m_tree = ID3(m)
         for trainIdx, testIdx in k_fold.split(train):
             y_prediction = m_tree.fit_predict(train[trainIdx], train[testIdx])
             m_acc = accuracy(y_prediction, train[testIdx])
-            m_arr.append(m_acc)
-        accuracies.append(np.mean(m_arr))
+            m_accuracy.append(m_acc)
+        accuracies.append(np.mean(m_accuracy))
 
+    """
     max_accuracy = np.max(accuracies)
-    print("Best prune value is: ", end=" ")
+    print("Best prune value is:", end=" ")
     print(m_choices[accuracies.index(max_accuracy)], end=" ")
-    print("with accuracy =", end=" ")
+    print("with test accuracy =", end=" ")
     print(max_accuracy)
     pyplot.plot(m_choices, accuracies)
     pyplot.title("pruning effect")
     pyplot.xlabel("m_choice")
     pyplot.ylabel("accuracy")
     pyplot.show()
+    """
     return
 
 
+# ========================================================================
+# This function calculate the loss for question 4 section 1
+# arguments: train - the train set we use to train the model
+# to print remove the quotes
 def experiment_loss_first_section(train):
-    k_fold = KFold(n_splits=5, shuffle=True, random_state=208136176)
-    m_choices = [10]
+    k_fold = KFold(n_splits=5, shuffle=True, random_state=ID)
+    m_choices = [0]
     accuracies = []
     for m in m_choices:
-        m_arr = []
+        m_accuracy = []
         m_tree = ID3(m)
         for trainIdx, testIdx in k_fold.split(train):
             y_prediction = m_tree.fit_predict(train[trainIdx], train[testIdx])
             m_acc = accuracy_loss_first_section(y_prediction, train[testIdx])
-            m_arr.append(m_acc)
-        accuracies.append(np.mean(m_arr))
+            m_accuracy.append(m_acc)
+        accuracies.append(np.mean(m_accuracy))
+    """
     print(accuracies)
+    """
     return
 
 
@@ -193,19 +208,25 @@ def accuracy_loss_first_section(y_prediction, test):
     return FP + 8 * FN
 
 
+# ========================================================================
+# This function calculate the loss for question 4 section 2
+# arguments: train - the train set we use to train the model
+# to print remove the quotes
 def experiment_loss_second_section(train):
-    k_fold = KFold(n_splits=5, shuffle=True, random_state=208136176)
-    m_choices = [10]
+    k_fold = KFold(n_splits=5, shuffle=True, random_state=ID)
+    m_choices = [8]
     accuracies = []
     for m in m_choices:
-        m_arr = []
+        m_accuracy = []
         m_tree = ID3(m)
         for trainIdx, testIdx in k_fold.split(train):
             y_prediction = m_tree.fit_predict(train[trainIdx], train[testIdx])
             m_acc = accuracy_loss_second_section(y_prediction, train[testIdx])
-            m_arr.append(m_acc)
-        accuracies.append(np.mean(m_arr))
+            m_accuracy.append(m_acc)
+        accuracies.append(np.mean(m_accuracy))
+    """
     print(accuracies)
+    """
     return
 
 
@@ -216,13 +237,3 @@ def accuracy_loss_second_section(y_prediction, test):
         if test[i][0] == 'B':
             FP += 1
     return FP
-
-
-if __name__ == '__main__':
-    train = (pandas.read_csv('train.csv')).to_numpy()
-    # test = (pandas.read_csv('test.csv')).to_numpy()
-    # tree = ID3()
-    # tree.fit_predict(train, test)
-
-    # experiment
-    experiment(train)
